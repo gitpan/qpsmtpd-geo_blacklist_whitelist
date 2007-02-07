@@ -1,0 +1,224 @@
+=head1 NAME
+
+geo_blacklist_whitelist Version 1.1b by Marc Sebastian Pelzer http://search.cpan.org/~mpelzer/
+
+=head1 DESCRIPTION
+
+This plugin allowes you to block incoming connections from specific countries
+and/or cities. You can define a blacklist and a whitelist file in the config/
+directory of your qpsmtpd installation. These file must be called 'geo_blacklist'
+and 'geo_whitelist'. Entries in the blacklist will be overwritten by entries in
+the whitelist. So, for example, to just receive emails from senders within your
+country, put a *.* entry into the blacklist file and a *.IT (for Italy) or *.US
+(for the USA) into the whitelist file.
+
+City names must be a wildcard (*) if you mean 'every city' or the concrete city
+name, like 'Seattle' or 'seattle' or 'SEATTLE' (city names are case insensitive).
+
+The country must be specified as a 2 letter ISO 3166 code or as wildcard (*) if you
+mean 'every country'. See 
+
+http://userpage.chemie.fu-berlin.de/diverse/doc/ISO_3166.html
+
+(or google for 'ISO 3166') for a list of all ISO 3166 codes (the column 'A 2' is what we want).
+
+This plugin is using the Geo-IP database from mindmax.com
+(http://www.maxmind.com/app/ip-location). They offer a licensed (more accurate) version
+and also a free (lite) version of their GEO country & city database. You can get
+the free version from here (download the binary database and put it
+somewhere where your qpsmtpd user can access & read it):
+
+http://www.maxmind.com/app/geolitecity
+
+The database is updated every month; so you maybe want to set-up a cronjob
+which updates the database automatically every month, like:
+
+0 4 3 * * 	smtp	wget -T 60 -t 3 -q -o /tmp/GeoLiteCity.dat.gz http://www.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz ; gunzip /tmp/GeoLiteCity.dat.gz ; mv /tmp/GeoLiteCity.dat /home/smtpd/
+
+You need the Geo-IP C libraries installed. Get them here:
+
+http://www.maxmind.com/app/c
+
+Or, if you have a Debian Linux running, by simpliy typing:
+
+apt-get install libgeoip-dev libgeoip1
+
+You also need the Perl Module Geo::IP installed. Get it via:
+
+perl -MCPAN -e shell
+install Geo::IP
+
+or as HTTP download from CPAN:
+
+http://search.cpan.org/~tjmather/Geo-IP-1.27/
+
+Put a geo_blacklist_whitelist entry into your config/plugins file - somewhere in the upper section.
+
+Example "config/plugins" entry:
+
+geo_blacklist_whitelist	/home/smtpd/GeoCity.dat active
+
+This plugin should be called with two parameters. The first parameter has to be the full path + filename
+of your GeoCity.dat database file (downloaded from mindmax.com). Make sure that your qpsmtpd user can
+access and read the file!
+
+As second parameter you can add a "active", which means that this plugin should become into production
+and really deny connection bases on your black/whitelist defitions. I recommend that you run this plugin like this
+for the start to see what happens and to fine-tune your black/whitelists files:
+
+geo_blacklist_whitelist	/home/smtpd/GeoCity.dat
+
+and then do a grep 'geo_blacklist_whitelist' on your qpsmtpd debug logfile in order to see it working. If you dont
+specify the "active" parameter, the plugin will run in a "dry-mode" - which means that is does not DENY any connection
+but just send some debug output instead.
+
+If you want to reject connections from un-locatable peers, you could add an entry
+
+*.UNKNOWN
+
+into the geo_blacklist file. By default, we let this connections pass through.
+
+
+Example config/geo_blacklist config file:
+
+*.*				# no mails from anyone - will be overwritten by entries in geo_whitelist
+*.CN			# no mails from China
+*.KR			# no mails from Korea
+*.TW			# no mails from Taiwan
+Texas.US		# no mails from Texas
+*.RU			# no mails from Russia
+Berlin.*		# no mails from any city in the world called Berlin
+*.UNKNOWN		# no mails from un-locatable connections; by default we let this connections pass through
+
+Example config/geo_whitelist config file:
+
+*.IT			# anyone from Italy
+New York.US		# anyone from New York
+Moscow.RU		# people from Moscow can mail me
+Beijing.CN		# i want mails from Beijing in China
+
+
+Take a look at the top 10 most spamming countries; maybe it helps you to define your blacklisting :)
+
+http://www.spamhaus.org/statistics/countries.lasso
+
+=cut
+
+use Geo::IP;
+
+sub register {
+
+	my ($self, $qp, @args) = @_;
+
+	# check if we've been called with a path to the database file
+	#
+	if (-r $args[0] && $args[0] =~ m!\.dat$!i) {
+
+      $self->{_GEOCITY_DATABASE} = $args[0];
+
+	  $self->log(LOGINFO, "OK. Using Geo-City-Database '". $args[0] . "'");
+
+	} else {
+
+		die "Bad argument - need a full path and filename to your Geo-City-Database .dat file!";
+	}
+
+	# check if we should run in production mode or not
+	#
+	if (grep (/active/, @args)) {
+
+		$self->log(LOGINFO, "Running in ACTIVE mode. This means that we reject connections based on the defined rules!");
+
+		$self->{_MODE} = 'active';
+
+	} else {
+
+		$self->log(LOGINFO, "Running in DRY-RUN mode. This means that we do not reject any connections but instead print some debug messages what would happen.");
+
+		$self->{_MODE} = 'dry-run';
+	}
+}
+
+sub hook_connect {
+
+    my ($self, $transaction) = @_;
+    my ($g, $r, $element, $status, $match, $rule, $ci, $co);
+
+	$status = '';
+
+    my $remote_ip = $self->qp->connection->remote_ip;
+    my $remote_host = $self->qp->connection->remote_host;
+
+    my @geo_whitelist = $self->qp->config("geo_whitelist");
+    my @geo_blacklist = $self->qp->config("geo_blacklist");
+
+	$g = Geo::IP->open($self->{_GEOCITY_DATABASE}, GEOIP_STANDARD);
+	$r = $g->record_by_addr($remote_ip);
+
+	# check wether we can resolve the city name and country code or set some default values
+	#
+	my $city = $r->city || '*';
+	my $country_code = $r->country_code || 'UNKNOWN';
+	my $country_name = $r->country_name || 'Unknown';
+
+	# first, check if the current city + country is blacklisted
+	#
+	my $counter = 0;
+	
+	foreach $element (@geo_blacklist) {
+
+		++$counter;
+
+		($ci, $co) = ($element =~ m!^\s*([^\.]+)\.([^\s\#]+)!);
+
+		if ((lc($ci) eq lc($city) || $ci eq '*') && (lc($co) eq lc($country_code) || $co eq '*')) {
+
+			$self->log(LOGDEBUG, "geo_blacklist: given city '$city' and country_code '$country_code' ($country_name) matching rule in line $counter '$element'");
+		
+			$match = $counter;
+			$status = 'forbidden';
+			
+			last;
+		}
+	}
+
+	# then check if it's whitelisted somehow - this overwites a former
+	# blacklist entry
+	#
+	$counter = 0;
+	
+	foreach $element (@geo_whitelist) {
+
+		++$counter;
+
+		($ci, $co) = ($element =~ m!^\s*([^\.]+)\.([^\s\#]+)!);
+
+		if ((lc($ci) eq lc($city) || $ci eq '*') && (lc($co) eq lc($country_code) || $co eq '*')) {
+
+			$self->log(LOGDEBUG, "geo_whitelist: given city '$city' and country_code '$country_code' ($country_name) matching rule in line $counter '$element'");
+
+			$status = '';
+
+			last;
+		}
+	}
+
+
+	if ($status eq 'forbidden') {
+
+		$self->log(LOGINFO, "Remote peers ($remote_ip / $remote_host) city '$city' and country_code '$country_code' ($country_name) is blacklisted (matched line $match). We DENY this connection.");
+
+		if ($self->{_MODE} eq "active") {
+
+			return (DENY, "Sorry, not allowed.");
+		}
+
+	} else {
+
+		$self->log(LOGINFO, "Remote peers ($remote_ip / $remote_host) city '$city' and country_code '$country_code' ($country_name) is allowed to pass through.");
+	}
+
+	return DECLINED;
+}
+
+1;
