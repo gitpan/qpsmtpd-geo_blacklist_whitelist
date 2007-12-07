@@ -1,6 +1,6 @@
 =head1 NAME
 
-geo_blacklist_whitelist Version 1.1b by Marc Sebastian Pelzer http://search.cpan.org/~mpelzer/
+geo_blacklist_whitelist Version 1.2 by Marc Sebastian Pelzer http://search.cpan.org/~mpelzer/
 
 =head1 DESCRIPTION
 
@@ -33,7 +33,7 @@ http://www.maxmind.com/app/geolitecity
 The database is updated every month; so you maybe want to set-up a cronjob
 which updates the database automatically every month, like:
 
-0 4 3 * * 	smtp	wget -T 60 -t 3 -q -o /tmp/GeoLiteCity.dat.gz http://www.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz ; gunzip /tmp/GeoLiteCity.dat.gz ; mv /tmp/GeoLiteCity.dat /home/smtpd/
+0 4 3 * * 	smtp	wget -T 60 -t 3 -q -O - http://www.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz | gunzip -c > /home/smtpd/GeoIPCity.dat
 
 You need the Geo-IP C libraries installed. Get them here:
 
@@ -53,6 +53,8 @@ or as HTTP download from CPAN:
 http://search.cpan.org/~tjmather/Geo-IP-1.27/
 
 Put a geo_blacklist_whitelist entry into your config/plugins file - somewhere in the upper section.
+If you're using the "nodialup" plug-in (which I highly recommend), then you should load this plug-in
+after the nodialup because it's less "expensive" (just using RegExp instead of doing IO and database look-ups).
 
 Example "config/plugins" entry:
 
@@ -76,17 +78,17 @@ If you want to reject connections from un-locatable peers, you could add an entr
 
 *.UNKNOWN
 
-into the geo_blacklist file. By default, we let this connections pass through.
+into the geo_blacklist file. By default, we let this connections pass through. All connections from
+localhost/127.0.0.1 will appear as *.LOCAL
 
 
 Example config/geo_blacklist config file:
 
-*.*				# no mails from anyone - will be overwritten by entries in geo_whitelist
+*.*			# no mails from anyone - will be overwritten by entries in geo_whitelist
 *.CN			# no mails from China
 *.KR			# no mails from Korea
 *.TW			# no mails from Taiwan
 Texas.US		# no mails from Texas
-*.RU			# no mails from Russia
 Berlin.*		# no mails from any city in the world called Berlin
 *.UNKNOWN		# no mails from un-locatable connections; by default we let this connections pass through
 
@@ -101,6 +103,11 @@ Beijing.CN		# i want mails from Beijing in China
 Take a look at the top 10 most spamming countries; maybe it helps you to define your blacklisting :)
 
 http://www.spamhaus.org/statistics/countries.lasso
+
+=head1 CHANGELOG
+
+Dec/7/2007	Marc Sebastian Pelzer	Version 1.2		Fixed a bug where connection from localhost caused a failure of Geo::IP's methods
+
 
 =cut
 
@@ -157,9 +164,22 @@ sub hook_connect {
 
 	# check wether we can resolve the city name and country code or set some default values
 	#
-	my $city = $r->city || '*';
-	my $country_code = $r->country_code || 'UNKNOWN';
-	my $country_name = $r->country_name || 'Unknown';
+    my $city = '*';
+    my $country_code = 'UNKNOWN';
+    my $country_name = 'Unknown';
+
+    if ($remote_ip eq '127.0.0.1') {
+
+    	$city = '*';
+        $country_code = 'LOCAL';
+        $country_name = 'Local';
+
+    } else {
+
+	    eval { $city = $r->city || '*' };
+	    eval { $country_code = $r->country_code || 'UNKNOWN' };
+	    eval { $country_name = $r->country_name || 'Unknown' };
+    }
 
 	# first, check if the current city + country is blacklisted
 	#
